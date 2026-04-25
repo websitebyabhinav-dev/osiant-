@@ -1,143 +1,119 @@
 import os
-import time
-import sqlite3
 import requests
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
-from datetime import datetime
+import telebot
+from dotenv import load_dotenv
 
-# --- CONFIGURATION (Safe Environment Variables) ---
-API_TOKEN = os.getenv('BOT_TOKEN')
-# Fetching the API link and Key from Railway Settings
-INFO_API_URL = os.getenv('INFO_API_URL') 
-API_SECRET_KEY = os.getenv('API_KEY') 
+# Environment variables load karein (.env file ya Render dashboard se)
+load_dotenv()
 
-CHANNEL_ID = "@LighZYagami" 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+# --- CONFIGURATION ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = os.getenv("OWNER_ID")
+API_KEY = os.getenv("API_KEY") # Render dashboard mein 'TVB_FULL_52F4672E' dalein
 
-last_search_time = {}
+CHANNEL_ID = "@Lulzsec_empire"
+BASE_URL = "https://techvishalboss.com/api/v1/lookup.php"
 
-# --- DATABASE SETUP ---
-conn = sqlite3.connect('users.db', check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS users 
-                  (user_id INTEGER PRIMARY KEY, 
-                   searches_left INTEGER, 
-                   total_refers INTEGER,
-                   last_reset_date TEXT)''')
-conn.commit()
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- HELPER FUNCTIONS ---
 
-async def is_subscribed(user_id):
+def is_joined(user_id):
+    """Checks if user is a member of the required channel"""
     try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        member = bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except Exception:
+    except:
         return False
 
-def get_user_data(user_id):
-    cursor.execute("SELECT searches_left, total_refers, last_reset_date FROM users WHERE user_id = ?", (user_id,))
-    return cursor.fetchone()
+def clean_response(data):
+    """Removes branding and owner info from the JSON response"""
+    if isinstance(data, dict):
+        # In keys ko output mein nahi dikhaya jayega
+        blocked_keys = ['branding', 'owner', 'credit', 'developer', 'status', 'success', 'key_status']
+        
+        info_parts = []
+        for key, value in data.items():
+            if key.lower() not in blocked_keys and value:
+                # Key name ko sundar banane ke liye (e.g. 'full_name' -> 'Full Name')
+                clean_key = key.replace('_', ' ').title()
+                info_parts.append(f"🔹 **{clean_key}**: `{value}`")
+        
+        return "\n".join(info_parts) if info_parts else "⚠️ No valid information found."
+    return str(data)
 
-def update_daily_limit(user_id, data):
-    today = datetime.now().strftime('%Y-%m-%d')
-    searches, refers, last_date = data
-    if last_date != today:
-        cursor.execute("UPDATE users SET searches_left = 10, last_reset_date = ? WHERE user_id = ?", (today, user_id))
-        conn.commit()
-        return (10, refers, today)
-    return data
+# --- BOT HANDLERS ---
 
-# --- COMMANDS ---
-
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    args = message.get_args()
-    today = datetime.now().strftime('%Y-%m-%d')
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    user = message.from_user
     
-    data = get_user_data(user_id)
-    if not data:
-        referrer = args if (args.isdigit() and int(args) != user_id) else None
-        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user_id, 10, 0, today))
-        if referrer:
-            cursor.execute("UPDATE users SET searches_left = searches_left + 1, total_refers = total_refers + 1 WHERE user_id = ?", (referrer,))
-            try:
-                await bot.send_message(referrer, "🎊 *New Referral Alert!*\nSomeone joined via your link. You got **+1 search credit**!")
-            except:
-                pass
-        conn.commit()
-
-    welcome_text = (
-        f"👋 *Welcome to OSINT Lookup Bot!*\n\n"
-        f"📢 *Requirement:* Join {CHANNEL_ID} to use this bot.\n"
-        f"💰 *Daily Credits:* 10 Searches.\n"
-        f"🤝 *Referral:* Get +1 credit per invite."
-    )
-    await message.reply(welcome_text, parse_mode="Markdown")
-
-@dp.message_handler(commands=['profile'])
-async def cmd_profile(message: types.Message):
-    user_id = message.from_user.id
-    data = get_user_data(user_id)
-    if not data: return await message.reply("Please /start the bot.")
+    # Owner ko notification bhejna (Jab bhi koi bot start kare)
+    log_text = (f"🚀 **New User Alert!**\n\n"
+                f"👤 Name: {user.first_name}\n"
+                f"🆔 ID: `{user.id}`\n"
+                f"🔗 Username: @{user.username if user.username else 'None'}")
     
-    searches, refers, last_date = update_daily_limit(user_id, data)
-    profile_msg = (
-        f"👤 *YOUR PROFILE*\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🆔 ID: `{user_id}`\n"
-        f"🔍 Remaining Credits: **{searches}**\n"
-        f"👥 Total Refers: **{refers}**"
-    )
-    await message.reply(profile_msg, parse_mode="Markdown")
+    if OWNER_ID:
+        try:
+            bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
+        except:
+            pass
+            
+    bot.reply_to(message, "✅ Bot is active!\n\nUse me in my official group for OSINT lookups.\nCommands: `/no`, `/vec`, `/tg`", parse_mode="Markdown")
 
-@dp.message_handler(commands=['referral'])
-async def cmd_referral(message: types.Message):
+@bot.message_handler(commands=['no', 'vec', 'tg'])
+def handle_osint(message):
     user_id = message.from_user.id
-    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={user_id}"
-    await message.reply(f"🔗 *YOUR REFERRAL LINK*\n\n`{ref_link}`\n\nInvite friends for +1 credit per join!", parse_mode="Markdown")
+    chat_id = message.chat.id
+    cmd = message.text.split()[0].lower()
 
-@dp.message_handler(commands=['num'])
-async def cmd_num(message: types.Message):
-    user_id = message.from_user.id
+    # 1. Force Join Check
+    if not is_joined(user_id):
+        bot.reply_to(message, f"❌ Aapne channel join nahi kiya hai.\n\nPehle join karein: {CHANNEL_ID}")
+        return
+
+    # 2. Group Only Check
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.reply_to(message, "❌ Ye bot security ki wajah se sirf Groups mein kaam karta hai.")
+        return
+
+    # 3. Input Validation
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, f"Usage: `{cmd} [input]`\nExample: `{cmd} 91XXXXXXXXXX`", parse_mode="Markdown")
+        return
     
-    # Force Join Check
-    if not await is_subscribed(user_id):
-        return await message.reply(f"⚠️ *Access Denied!*\nPlease join {CHANNEL_ID} to use this bot.")
+    query_val = args[1]
+    wait_msg = bot.reply_to(message, "🔎 Database se info fetch kar raha hoon... wait.")
 
-    data = get_user_data(user_id)
-    if not data: return await message.reply("Please /start first.")
+    # 4. API Request Setup
+    params = {"key": API_KEY}
     
-    searches, refers, last_date = update_daily_limit(user_id, data)
-    if searches <= 0:
-        return await message.reply("❌ *Limit Reached!*\nInvite friends or wait for tomorrow.")
+    if cmd == "/no":
+        params.update({"service": "number", "number": query_val})
+    elif cmd == "/tg":
+        params.update({"service": "tg_to_number", "telegram": query_val})
+    elif cmd == "/vec":
+        params.update({"service": "vehicle_owner_number", "rc": query_val})
 
-    # Flood Protection
-    current_time = time.time()
-    if user_id in last_search_time and current_time - last_search_time[user_id] < 30:
-        return await message.reply(f"⏳ Please wait {int(30-(current_time-last_search_time[user_id]))}s.")
-
-    phone = message.get_args()
-    if not phone: return await message.reply("❓ Usage: `/num 91888xxxxxx`", parse_mode="Markdown")
-
-    # --- THE SECURE API CALL ---
+    # 5. Fetching & Cleaning Data
     try:
-        final_url = f"{INFO_API_URL}?key={API_SECRET_KEY}&num={phone}"
-        response = requests.get(final_url, timeout=10)
+        response = requests.get(BASE_URL, params=params)
         
         if response.status_code == 200:
-            cursor.execute("UPDATE users SET searches_left = searches_left - 1 WHERE user_id = ?", (user_id,))
-            conn.commit()
-            last_search_time[user_id] = current_time
-            await message.reply(f"✅ *Lookup Results:* \n\n`{response.text}`", parse_mode="Markdown")
+            json_data = response.json()
+            # Clean results (remove branding)
+            final_info = clean_response(json_data)
+            
+            output_msg = f"🔍 **OSINT Result for {query_val}:**\n\n{final_info}"
+            bot.edit_message_text(output_msg, chat_id, wait_msg.message_id, parse_mode="Markdown")
         else:
-            await message.reply("❌ API is currently offline.")
-    except Exception:
-        await message.reply(f"⚠️ Connection error with API.")
+            bot.edit_message_text("⚠️ API Error: Server response nahi de raha.", chat_id, wait_msg.message_id)
+            
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error occurred: {str(e)}", chat_id, wait_msg.message_id)
 
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
-    
+# Bot ko start karna
+print("Bot running successfully...")
+bot.infinity_polling()
